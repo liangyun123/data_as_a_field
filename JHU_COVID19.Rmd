@@ -1,0 +1,261 @@
+---
+title: "COVID19"
+author: "Liang Yam"
+date: '2022-10-10'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+```
+
+## Step 1 - Identify and import data
+I will start by creating the urls needed to access the 4 csvs I will be using
+
+```{r get_jhu_data}
+# Get current Data in the four files
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c("time_series_covid19_confirmed_global.csv", "time_series_covid19_deaths_global.csv", "time_series_covid19_confirmed_US.csv", "time_series_covid19_deaths_US.csv")
+urls <- str_c(url_in, file_names)
+```
+
+Let's read in the data and see what we have
+
+```{r import_data, message = F}
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+US_cases <- read_csv(urls[3])
+US_deaths <- read_csv(urls[4])
+```
+
+After looking at global_cases and global_deaths, I would like to tidy those datasets by putting each variable (date, cases, deaths) in their own column.
+
+Also, I don't need Lat and Long for the analysis I am planning. 
+
+```{r tidy_global_cases}
+global_cases <- global_cases %>%
+  pivot_longer(cols = -c('Province/State', 'Country/Region', Lat, Long), names_to = "date", values_to = "cases") %>% 
+  select(-c(Lat, Long))
+global_cases
+```
+
+```{r tidy_global_deaths}
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = -c('Province/State', 'Country/Region', Lat, Long), names_to = "date", values_to = "deaths") %>% 
+  select(-c(Lat, Long))
+global_deaths
+```
+
+I want to combine my global_cases with my global_deaths and rename Region and State to be more R friendly.
+```{r combine_global_cases_deaths}
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(Country_Region = 'Country/Region',
+         Province_State = 'Province/State') %>%
+  mutate(date = mdy(date))
+global
+```
+Let's take a look at the summary of the global dataframe and see to see if there are any problems.
+```{r global_summary}
+summary(global)
+```
+Looking at the summary, it seems I have a lot of cases where there are no cases. Let's filter out the rows where there are no cases.
+```{r filter_cases}
+global <- global %>%
+  filter(cases > 0)
+```
+Let's look at the summary of this filtered dataframe. 
+```{r global_filter_summary}
+summary(global)
+```
+I noticed the maximum is quite large; let's also make sure the maximum cases is not a typo.
+```{r global_max_check}
+global %>% filter(cases > 96000000)
+```
+So this indicates that the cases is additive, but values great than 96 million are not typos.
+
+I will look into the US_cases and tidy the dataframe.
+```{r tidy_us_cases}
+US_cases <- US_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key), names_to = "date", values_to = "cases") %>% 
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+US_cases
+```
+I will look into the US_deaths and tidy the dataframe.
+```{r tidy_us_deaths}
+US_deaths <- US_deaths %>%
+  pivot_longer(cols = -(UID:Population), names_to = "date", values_to = "deaths") %>% 
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+US_deaths
+```
+I note that US_deaths dataframe has the population column, which our global_deaths dataframe did not. 
+
+I will join the US_cases and US_deaths dataframes together.
+```{r combine_US_cases_deaths}
+US <- US_cases %>%
+  full_join(US_deaths)
+US
+```
+So my I want to match the global dataframe with the US dataframe. The clear differences is that the US dataframe has Combined_Key (the State and Country concatenated) and Population fields. For the global dataframe, Combined_Key will be value of concatenating Province_State with Country_Region 
+```{r tidy_global_dataframe}
+global <- global %>%
+  unite("Combined_Key", 
+        c(Province_State, Country_Region),
+        sep = ", ",
+        na.rm = T,
+        remove = F)
+```
+
+The global dataframe is missing the population column, so I will need to import this data and join with the global dataframe.
+```{r import_population_combine_with_global}
+url_population <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+global_pop <- read_csv(url_population) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+global <- global %>%
+  left_join(global_pop, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+global
+```
+##Step 2 - Analysis
+My first analysis looks at each state's cases and deaths per day. I will also create a new field that calculates the number of deaths per million people.
+```{r US_by_stae}
+US_by_state <- US %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths*1000000/Population) %>%
+  select(Province_State, Country_Region, date, cases, deaths, deaths_per_mill, Population)
+US_by_state
+```
+
+I will also look at the entire US cases and deaths per day and create a new field to calculate number of deaths per million people.
+```{r US_overall}
+US_totals <- US_by_state %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths*1000000/Population) %>%
+  select(Country_Region, date, cases, deaths, deaths_per_mill, Population)
+US_totals
+```
+I am interested in visualizing how the total number of cases and deaths per day has changed over the pandemic by using a scatter plot
+```{r US_overall_visualizations} 
+US_totals %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) + geom_line(aes(color = "cases")) + geom_point(aes(color = "cases")) + geom_line(aes(y = deaths, color = "deaths")) + geom_point(aes(y = deaths, color = "deaths")) + scale_y_log10() + theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) + labs(title = "COVID19 in US", y = NULL)
+```
+Notice a huge spike at the beginning of the pandemic, then the cases and deaths start to grow linearly. 
+
+Since I currently reside in New York, I will create a visualization of how New York's cases and deaths have changed overtime. 
+```{r NY_visualizations} 
+US_by_state %>%
+  filter(cases > 0) %>%
+  filter(Province_State == "New York") %>%
+  ggplot(aes(x = date, y = cases)) + geom_line(aes(color = "cases")) + geom_point(aes(color = "cases")) + geom_line(aes(y = deaths, color = "deaths")) + geom_point(aes(y = deaths, color = "deaths")) + scale_y_log10() + theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) + labs(title = "COVID19 in New York", y = NULL)
+```
+I notice that the overall trend of New York's cases and deaths matches very closely to the trend for the Overall US cases and deaths. 
+
+In the next analysis, I want to calculate the number of new cases and new deaths that occurs for each state and for US overall.
+```{r US_new_cases_death} 
+US_by_state <- US_by_state %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+US_totals <- US_totals %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+```
+
+I will then graph how many new cases and deaths we are seeing for each day.
+```{r US_new_cases_deaths_visualizations} 
+US_totals %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = new_cases)) + geom_line(aes(color = "new_cases")) + geom_point(aes(color = "new_cases")) + geom_line(aes(y = new_deaths, color = "new_deaths")) + geom_point(aes(y = new_deaths, color = "new_deaths")) + scale_y_log10() + theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) + labs(title = "COVID19 in US", y = NULL)
+```
+This plot shows the new cases oscillating between 10000 to 100000, and new deaths oscillating between 100-1000.
+
+```{r NY_new_cases_deaths_visualizations} 
+US_by_state %>%
+  filter(cases > 0) %>%
+  filter(Province_State == "New York") %>%
+  ggplot(aes(x = date, y = new_cases)) + geom_line(aes(color = "new_cases")) + geom_point(aes(color = "new_cases")) + geom_line(aes(y = new_deaths, color = "new_deaths")) + geom_point(aes(y = new_deaths, color = "new_deaths")) + scale_y_log10() + theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) + labs(title = "COVID19 in New York", y = NULL)
+```
+We notice a similar oscillation pattern (mainly the spike in January 2021 and January 2022, the the dip in June/July 2021) in the overall US new cases and new deaths visualization compared to the New York new cases and new deaths. 
+
+For the next analysis, we will calculate the rate of deaths and cases for each state.
+```{r US_transform} 
+US_state_totals <- US_by_state %>%
+  group_by(Province_State) %>%
+  summarize(deaths = max(deaths), cases = max(cases), population = max(Population),
+            cases_per_thou = 1000*cases/population, deaths_per_thou = 1000*deaths/population) %>%
+  filter(cases > 0, population > 0)
+US_state_totals %>% 
+  arrange(deaths_per_thou, descending = T)
+```
+
+## Step 3 - Modelling
+We will now create a model that predicts the rates of deaths by rates of cases for each of the states
+```{r US_model_create} 
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = US_state_totals)
+summary(mod)
+```
+Our model is using the line formula, deaths_per_thou = cases_per_thou * .01117 - .271116
+
+Let's first take a look which states have the lowest and highest cases per thousand people.
+```{r State_lowest_rate} 
+US_state_totals %>% slice_min(cases_per_thou)
+```
+
+```{r State_highest_rate} 
+US_state_totals %>% slice_max(cases_per_thou)
+```
+Using our linear model we created above, we will try predict each state's death_per_thou by using the state's cases_per_thou.
+```{r State_predict} 
+US_state_totals_w_pred <- US_state_totals %>% mutate(pred = predict(mod))
+US_state_totals_w_pred
+```
+
+We graph this data to see how far our prediction deviates from the actual deaths_per_thou
+```{r State_with_prediction_visualization} 
+US_state_totals_w_pred %>%
+  ggplot() + geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") + geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+```
+Looking at the visualization, our model does not predict death_per_thou well using only cases_per_thou. The model is able to capture the upward trend, but the data points scatter around the line and deviates from the line. 
+
+I will try to create a model that is beyond what was done already by creating a model that utilizes more features to predict deaths_per_thous
+
+Our initial model achieved an R2 value of .28. I think adding in additional features would improve our model. 
+
+
+I first need to load in the data
+```{r load_vaccine_data} 
+url_more <- "https://raw.githubusercontent.com/BloombergGraphics/covid-vaccine-tracker-data/master/data/current-usa.csv"
+vaccine <- read_csv(url_more)
+vaccine
+```
+I will need to join the data with my dataset.
+```{r join_us_with_vac}
+US_state_totals <- US_state_totals %>%
+  left_join(vaccine, by = c("Province_State"= "name"))
+US_state_totals
+```
+I will now use the completedVaccination, dosesAdmininistered, and peopleVaccinated columns as features.
+```{r US_model_create_improved} 
+mod <- lm(deaths_per_thou ~ cases_per_thou + completedVaccination + peopleVaccinated + dosesAdministered, data = US_state_totals)
+summary(mod)
+```
+Our model was able to generate a higher R2 value using the 3 additional columns! This is very reasonable because as more people get vaccinated and more dosage given injected, the likelihood of dying decreases and so more data. 
+
+## Bias
+I think the main bias is that the reported amount might be lowered. Because COVID can now be screened at home, many recent cases might not be reported, and thus the data might be skewed because the number of cases recently are lowered. This could very much impact our model because the data is being only trained on known COVID cases, and not all COVID cases, while death related to COVID is known since it requires a death certificate. When we created the number of cases_per_thou, this variable should be a lot higher since there technically could be more cases. 
+
+## Appendix - Libraries
+```{r chunk}
+sessionInfo()
+```

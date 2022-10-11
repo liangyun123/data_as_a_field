@@ -1,0 +1,133 @@
+---
+title: "NYPD_Shooting_Incident"
+author: "Liang Yam"
+date: '2022-09-25'
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+```
+
+## Step 1 - Identify and import data
+My first step is to import the data into R.
+
+```{r import_data}
+url = "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+NYPD_Shootiing_Incident <- read_csv(url)
+NYPD_Shootiing_Incident
+```
+I will not use the X_COORD_CD, Y_COORD_CD, Latitude, Longitude in my analysis. In addition, JURISDICTION_CODE is the location of the incident, where 0 represents patrol, 1 represents transit, 2 represents housing, and anything above 2 is outside of NYPD jurisdiction.
+
+```{r data_clean}
+NYPD_Shootiing_Incident <- NYPD_Shootiing_Incident %>%
+  select(-c(X_COORD_CD:Lon_Lat)) %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE),
+         JURISDICTION_CODE = case_when(JURISDICTION_CODE == 0 ~ 'Patrol',
+                                       JURISDICTION_CODE == 1 ~ 'Transit',
+                                       JURISDICTION_CODE == 2 ~ 'Housing',
+                                       JURISDICTION_CODE > 2 ~ 'Non NYPD jurisdictions'))
+NYPD_Shootiing_Incident
+```
+I want to first look at a summary of this table and understand some descriptive statistics of each of the columns and validate the data.
+```{r data_summary}
+summary(NYPD_Shootiing_Incident)
+```
+From the summary, I noticed that we have some data from Jan 2006 to December 2021. It also appears that majority of the columns are String variables. 
+
+## Step 2 - Analysis
+There are a few questions that intrigued me when looking at this data. My first analysis is understanding the fatal crimes, specifically the number of fatal crimes that are committed in each year for each borough. 
+
+I will first look at the count of yearly fatal crimes in each of the boroughs.
+```{r fatal_borough_analysis_data}
+NYPD_borough_fatal <- NYPD_Shootiing_Incident %>% 
+  filter(STATISTICAL_MURDER_FLAG == TRUE) %>%
+  mutate(year_occur = year(OCCUR_DATE)) %>%
+  group_by(BORO, year_occur) %>%
+  summarize(crimes = n())
+NYPD_borough_fatal
+```
+I will graph the fatal crimes and identify if there are any trends in the data.
+```{r fatal_borough_visualization}
+NYPD_borough_fatal %>%
+  ggplot(aes(x = year_occur)) + geom_point(aes(y = crimes, color = BORO)) + geom_line(aes(y = crimes, color = BORO))
+```
+
+Looking at the plot, there seems to be a decreasing trend of fatal crimes from 2006 to 2018, but started to increase and spike starting in 2019 and 2020. I am not surprised by this trend because of the movements and COVID in 2019 and 2020.
+
+I will now look at all crimes (both fatal and non-fatal) and see if the trend matches to fatal crime. I will first count the number of crimes in each borough
+```{r all_borough_analysis_data}
+NYPD_borough <- NYPD_Shootiing_Incident %>% 
+  mutate(year_occur = year(OCCUR_DATE)) %>%
+  group_by(BORO, year_occur) %>%
+  summarize(crimes = n())
+NYPD_borough
+```
+And then graph each borough's annual number of crime
+```{r all_borough_visualization}
+NYPD_borough %>%
+  ggplot(aes(x = year_occur)) + geom_point(aes(y = crimes, color = BORO)) + geom_line(aes(y = crimes, color = BORO))
+```
+It seems like the overall pattern remains the same, where there is a decreasing trend from 2006 to 2018, then an increasing trend from 2019 to 2021. 
+
+My second analysis will focus on understanding how victim's identity will correlate to crime's fatality.
+
+Let's first take a look at how victim's age group correlate with fatal vs non-fatal crimes. 
+
+```{r age_analysis}
+NYPD_Shootiing_Incident %>%
+  group_by(VIC_AGE_GROUP, STATISTICAL_MURDER_FLAG) %>%
+  summarize(count_age = n())
+```
+
+```{r age_visualization}
+NYPD_Shootiing_Incident %>%
+  ggplot(aes(x = VIC_AGE_GROUP, fill = STATISTICAL_MURDER_FLAG)) + geom_bar(position="dodge", stat = 'count')
+```
+I notice that there is an overwhelming number of crime committed that are both fatal and non-fatal are committed by age groups below age 45, and number of fatal crimes to non-fatal crimes are closest for age group 65+. This is probably because sustaining a minor injury might cause severe damages to elders. 
+
+Let's also look at how victim's sex correlate with fatal vs non-fatal crimes. 
+```{r sex_analysis}
+NYPD_Shootiing_Incident %>%
+  group_by(VIC_SEX, STATISTICAL_MURDER_FLAG) %>%
+  summarize(count_sex = n())
+```
+
+```{r sex_visualization}
+NYPD_Shootiing_Incident %>%
+  ggplot(aes(x = VIC_SEX, fill = STATISTICAL_MURDER_FLAG)) + geom_bar(position="dodge", stat = 'count') 
+```
+I notice that majority of the non-fatal crimes and fatal crimes are committed by men. And interesting note is that the percentage of fatal to non-fatal crime is roughly the same for female and male.
+
+## Step 3 - Model
+I will then attempt to create a model to predict whether a crime is fatal using borough, victim age group, and victim sex.
+```{r model_creation}
+model <- glm(STATISTICAL_MURDER_FLAG ~ BORO + VIC_SEX + VIC_AGE_GROUP,family=binomial(link='logit'),data=NYPD_Shootiing_Incident)
+summary(model)
+```
+Since our features were all classification, R had to encode our columns. However, looking at the summary, it appears that our intercept is negative, any age of over 18 will result in an increases to commit a crime, and being any other sex than Female actually lowers the estimate of committing a crime. 
+
+```{r predict_on_data}
+NYPD_Shootiing_Incident_w_pred <- NYPD_Shootiing_Incident %>% 
+  mutate(pred = predict(model, type='response')) %>%
+  select(c(STATISTICAL_MURDER_FLAG, pred, BORO, VIC_AGE_GROUP, VIC_SEX)) %>%
+  mutate(pred = ifelse(pred > .2,TRUE,FALSE))
+NYPD_Shootiing_Incident_w_pred
+```
+```{r accuracy_model}
+misClasificError <- mean(NYPD_Shootiing_Incident_w_pred$pred != NYPD_Shootiing_Incident_w_pred$STATISTICAL_MURDER_FLAG)
+paste('Accuracy:',1-misClasificError)
+```
+Our model was able to achieve an accuracy of 52% in predicting whether a victim was in a fatal crime given the borough of the crime, age and sex of the victim. 
+
+## Bias
+One possible bias in using this data is that this data is from known sources of crime. Some crime might not be reported to police out of fear, threats, or blackmail. Or there could be crime occurring but police were unable to detain any individuals or create a case. The crime listed in this data could be skewed towards less involved crime or only crimes that police were able to cite. 
+
+## Appendix - Libraries
+```{r chunk}
+sessionInfo()
+```
